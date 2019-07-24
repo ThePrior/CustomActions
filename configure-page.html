@@ -1,0 +1,362 @@
+<!-- 
+	NOTE: jQuery does not need to be loaded here once it has been inserted as a Custom Action 
+		  but leaving it in this page ensures the page works even if the jQuery Custom Action is deleleted.
+
+	NOTE: Loading jQuery as a Custom Action using the PNP Add-PnPJavaScriptLink DOES NOT WORK since scripts added in 
+		  way are injected into the page too late in it's loading. This also means don't specify the ID unless happy for
+		  the script to be loaded last.
+-->
+
+<script src="../sites/ReusableResources/SiteAssets/Scripts/jquery.min.js" type="text/javascript"></script>
+
+<script type="text/javascript">
+
+/*
+ * Adapted from: http://johnliu.net/blog/2015/12/the-safest-future-proof-way-to-brand-your-sharepoint-and-sharepoint-online
+ * Copyright - John Liu @ SharePoint Gurus sharepointgurus.net johnliu.net
+ * You are not allowed to remove this header, but you can update the page as you see fit :-)
+ */
+ 
+(function ($, spg) {
+    "use strict";
+		
+	var hostweburl;
+	var hostsiteurl;
+	var srcid;
+	var srcurl;
+	var srcsequence;
+
+	spg.initialise = function() {
+
+		// attach executeQueryPromise 
+		SP.ClientContext.prototype.executeQueryPromise = function () {
+			var deferred = $.Deferred();
+			this.executeQueryAsync(function () {
+				deferred.resolve(arguments);
+			}, function () {
+				deferred.reject(arguments);
+			});
+			return deferred.promise();
+		};
+
+		// get src of script we want to install/uninstall
+		srcurl = ($.getUrlVar("src") ? decodeURIComponent($.getUrlVar("src")) : 0) || "SiteAssets/hello.js";
+		srcsequence = 10000;
+
+		$("#scriptlink-name").val(srcurl);
+		$("#scriptlink-sequence").val(srcsequence);
+
+		findHostWebUrl(document.location.pathname).then(function (url) {
+			hostweburl = url;
+			if (hostweburl == "/") hostweburl = ""; // blank it if top web
+
+			var webContext = SP.ClientContext.get_current();
+			webContext.load(webContext.get_site());
+			var getSite = webContext.executeQueryPromise();
+			getSite.then(function () {
+				hostsiteurl = webContext.get_site().get_serverRelativeUrl();
+				if (hostsiteurl == "/") hostsiteurl = ""; // blank it if top web
+			}).then(function () {
+				$("#SPG-MainContent").show();
+			});
+
+			// read custom actions and set up button clicks
+			spg.listUserCustomActions();
+			$("button#install-site-user-custom-action").click(function () {
+				spg.installUserCustomAction("site");
+			});
+			$("button#uninstall-site-user-custom-action").click(function () {
+				spg.uninstallUserCustomAction("site");
+			});
+			$("button#install-web-user-custom-action").click(function () {
+				spg.installUserCustomAction("web");
+			});
+			$("button#uninstall-web-user-custom-action").click(function () {
+				spg.uninstallUserCustomAction("web");
+			});
+
+		});
+
+		
+	};
+
+    function findHostWebUrl(url) {
+        // trying to find the nearest CurrentWeb with a bit of recursive promise fun
+        var defer = $.Deferred();
+
+        url = url.substring(0, url.lastIndexOf("/"));
+
+        var p = $.ajax({
+            url: url + "/_api/web",
+            dataType: "json",
+            contentType: 'application/json',
+            headers: {"Accept": "application/json; odata=verbose"},
+            method: "GET",
+            cache: false
+        });
+        p.done(function (response) {
+            defer.resolve(response.d.ServerRelativeUrl);
+        });
+        p.fail(function () {
+
+            if (!url) {
+                defer.reject();
+                return;
+            }
+            // hmm not a web, go higher
+            var p1 = findHostWebUrl(url);
+            p1.then(defer.resolve, defer.reject);
+        });
+
+        return defer.promise();
+    }
+
+    $.extend({
+        getUrlVars: function () {
+            var vars = [], hash;
+            var hashes = window.location.search.slice(window.location.search.indexOf('?') + 1).split('&');
+            for (var i = 0; i < hashes.length; i++) {
+                hash = hashes[i].split('=');
+                vars.push(hash[0]);
+                vars[hash[0]] = hash[1];
+            }
+            return vars;
+        },
+        getUrlVar: function (name) {
+            return $.getUrlVars()[name];
+        }
+    });
+
+    // refresh both site and web custom actions
+    spg.listUserCustomActions = function () {
+        function listUserCustomAction(siteOrWeb) {
+
+            siteOrWeb = (siteOrWeb == "site" ? "site" : "web");
+
+            var p1 = $.ajax({
+                url: hostweburl + "/_api/" + siteOrWeb + "/userCustomActions?$orderby=Sequence",
+                dataType: "json",
+                contentType: 'application/json',
+                headers: {"Accept": "application/json; odata=verbose"},
+                method: "GET",
+                cache: false
+            });
+
+            p1.then(function (response) {
+
+                $("ul#" + siteOrWeb + "-user-custom-actions").empty();
+
+                $.each(response.d.results, function (i, result) {
+                    $("ul#" + siteOrWeb + "-user-custom-actions").append(
+                        "<li>" +
+                        " [" + result.Location + "] " +
+                        (result.Title || result.Name || "") +
+                        ", ScriptSrc=" + result.ScriptSrc +
+                        ", Sequence=" + result.Sequence +
+						", ID=" + result.Id +
+                        "</li>"
+                    );
+                });
+
+            });
+            return p1;
+        }
+
+        return $.when(
+            listUserCustomAction("site"),
+            listUserCustomAction("web")
+        );
+    };
+
+    // install site or web custom action
+    spg.installUserCustomAction = function (siteOrWeb) {
+
+        var webContext = SP.ClientContext.get_current();
+        var userCustomActions;
+        if (siteOrWeb == "site") {
+            userCustomActions = webContext.get_site().get_userCustomActions();
+        }
+        else {
+            userCustomActions = webContext.get_web().get_userCustomActions();
+        }
+        webContext.load(userCustomActions);
+
+        srcurl = $("#scriptlink-name").val();
+		srcurl = $.trim(srcurl);
+        srcid = $("#scriptlink-id").val();
+		srcid = $.trim(srcid);
+        srcsequence = parseInt($("#scriptlink-sequence").val()) || 10000;
+
+        var action = userCustomActions.add();
+
+        action.set_location("ScriptLink");
+        action.set_title(srcurl);
+        var isCss = /\.css$/gi.test(srcurl);
+        var block;
+        if (isCss) {
+            block = [
+                "(function(){",
+                "var head1 = document.getElementsByTagName('head')[0];",
+                "var link1 = document.createElement('link');",
+                "link1.type = 'text/css';",
+                "link1.rel = 'stylesheet';",
+                "link1.href = '" + hostsiteurl + "/" + srcurl + "';",
+                (srcid ? "link1.id = '" + srcid + "';" : ""),
+                "head1.appendChild(link1);",
+                "})();"
+            ].join("");
+            action.set_scriptBlock(block);
+        }
+        else if (srcid) {
+            block = [
+                "(function(){",
+                "var head1 = document.getElementsByTagName('head')[0];",
+                "var script1 = document.createElement('script');",
+                "script1.type = 'text/javascript';",
+                "script1.src = '" + hostsiteurl + "/" + srcurl + "';",
+                "script1.id = '" + srcid + "';",
+                "head1.appendChild(script1);",
+                "})();"
+            ].join("");
+            action.set_scriptBlock(block);
+        }
+        else {
+            action.set_scriptSrc("~sitecollection/" + srcurl);
+        }
+        action.set_sequence(srcsequence);
+        action.update();
+
+        webContext.load(action);
+        return webContext.executeQueryPromise().then(function () {
+            return spg.listUserCustomActions();
+        });
+
+    };
+
+    // uninstall site or web custom action
+    spg.uninstallUserCustomAction = function (siteOrWeb) {
+
+        var webContext = SP.ClientContext.get_current();
+        var userCustomActions = webContext.get_site().get_userCustomActions();
+
+        if (siteOrWeb == "site") {
+            userCustomActions = webContext.get_site().get_userCustomActions();
+        }
+        else {
+            userCustomActions = webContext.get_web().get_userCustomActions();
+        }
+        webContext.load(userCustomActions);
+
+        srcurl = $("#scriptlink-name").val();
+		srcurl = $.trim(srcurl);
+		srcid = $("#scriptlink-id").val();
+		srcid = $.trim(srcid);
+		$("#scriptlink-id").val("");
+
+        var p1 = webContext.executeQueryPromise();
+        var p2 = p1.then(function () {
+
+            var count = userCustomActions.get_count(), action = null;
+            for (var i = count - 1; i >= 0; i--) {
+                action = userCustomActions.get_item(i);
+				console.log(action.get_scriptSrc(), ", ", action.get_title(), ", ID: ", action.get_id() );
+                if (action.get_scriptSrc() == "~sitecollection/" + srcurl || action.get_title() == srcurl || action.get_id() == srcid) {
+                    action.deleteObject();
+                }
+            }
+            return webContext.executeQueryPromise().then(function () {
+                return spg.listUserCustomActions();
+            });
+
+        });
+
+        return p2;
+    };
+
+})(window.jQuery, window.spg = window.spg || {});
+
+$(document).ready(function () {
+	SP.SOD.executeFunc('sp.js', 'SP.ClientContext', window.spg.initialise);
+	// NOTE: The code below doesn't work. executeOrDelayUntilScriptLoaded does not force the script to be loaded.
+	// 		 See: 
+	//       https://sharepoint.stackexchange.com/questions/101844/why-does-sp-js-load-only-when-i-am-editing-a-web-part-page
+    //SP.SOD.executeOrDelayUntilScriptLoaded(window.spg.initialise, "sp.js"); 
+});
+
+</script>
+
+<style type="text/css">
+button {
+    width: 150px;
+    margin-bottom: 5px;
+}
+
+.left {
+    float: left;
+}
+
+.clear-left {
+    clear: left;
+}
+</style>
+
+<div id="SPG-MainContent" style="padding-left:20px; display:none; ">
+	<h1 class="ms-accentText">User Custom Actions Configuration</h1>
+	This page lists the current user custom actions configured for the current site and site collection.
+	<br />
+	<br />
+
+	<h2 class="ms-accentText">Site Collection User Custom Actions</h2>        
+	<ul id="site-user-custom-actions">            
+	</ul>
+
+	<br />
+
+	<h2 class="ms-accentText">Site User Custom Actions</h2>
+	<ul id="web-user-custom-actions">            
+	</ul>
+
+	<br />
+
+	<h2 class="ms-accentText">Install User Custom Action</h2>
+
+	<br />
+
+	<div class="left">
+		<label for="scriptlink-id" style="display:block;float:left;width:165px;">ID (usually leave blank - except for ID based uninstall)</label>
+		<label for="scriptlink-name" style="display:block;float:left;width:315px;">Url (e.g. SiteAssets/hello.js)</label>
+		<label for="scriptlink-sequence" style="display:block;float:left;width:165px;">Sequence (e.g. 10000)</label>
+	</div>
+	
+	<div class="clear-left left">
+		<input type="text" id="scriptlink-id" style="width:150px;" />
+		<input type="text" id="scriptlink-name" style="width:300px;" />
+		<input type="number" id="scriptlink-sequence" style="width:150px;" value="10000" />
+	</div>
+	<div class="clear-left left">
+		<button id="install-site-user-custom-action" type="button">Install Site Collection</button>
+		<button id="uninstall-site-user-custom-action" type="button">Uninstall Site Collection</button>
+		
+		<br />
+
+		<button id="install-web-user-custom-action" type="button">Install Current Web</button>
+		<button id="uninstall-web-user-custom-action" type="button">Uninstall Current Web</button>            
+	</div>
+
+	<br />
+	<br />
+
+</div>
+
+
+
+<html xmlns:mso="urn:schemas-microsoft-com:office:office" xmlns:msdt="uuid:C2F41010-65B3-11d1-A29F-00AA00C14882"><head>
+<!--[if gte mso 9]><xml>
+<mso:CustomDocumentProperties>
+<mso:FileVersion msdt:dt="string">N/A</mso:FileVersion>
+<mso:WhereUsed msdt:dt="string">/Pages/CustomActions.aspx
+
+NOTE: Unlike JavaScript files, .html files appear to always be loaded when the page loads and do not get cached?</mso:WhereUsed>
+</mso:CustomDocumentProperties>
+</xml><![endif]-->
+<title>configure-page.html</title></head>
